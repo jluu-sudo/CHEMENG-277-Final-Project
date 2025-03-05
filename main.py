@@ -1,107 +1,148 @@
-#test test
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from hmmlearn.hmm import GaussianHMM
-#Jessica's test text
+from sklearn import linear_model
+from sklearn.preprocessing import StandardScaler
+import pandas as pd
 
-# =============================================================================
-# 1. Data Input and Preprocessing
-# =============================================================================
-# Input: CSV file(s) from online datasets (e.g., NASA, Oxford, Battery Archive)
-# The CSV is expected to include columns: time, voltage, current, cycle_count, temperature.
-# For this example, assume the file 'battery_data.csv' is in the working directory.
+file_path = "Copy of Oxford_battery_data_charge.csv"
+data = pd.read_csv(file_path, low_memory=False)
 
-DATA_FILE = 'battery_data.csv'  # <-- Update this path with your actual CSV file
+# Print number of rows
+print(f"Total rows in dataset: {len(data)}")
+# Get unique battery cell numbers
+unique_cells = data['cell_number'].unique()
+print(f"Unique battery cells in dataset: {unique_cells}")
+print(f"Total unique battery cells: {len(unique_cells)}")
+print(data['cell_number'].value_counts())  # Number of rows per battery cell
+print("Unique charge cycles:", data['cycle_number'].nunique())
+
+# ========================
+# 1. Data Loading & Preprocessing
+# ========================
+file_path = "Copy of Oxford_battery_data_charge.csv"
+try:
+    data = pd.read_csv(file_path, low_memory=False)
+except FileNotFoundError:
+    print(f"Error: File '{file_path}' not found. Please check the path and filename.")
+    exit()
+
+# Compute charge as the cumulative sum of current * time difference per cycle
+if {'time', 'current', 'cell_number', 'cycle_number'}.issubset(data.columns):
+    data['time_diff'] = data.groupby(['cell_number', 'cycle_number'])['time'].diff().fillna(0)
+    data['charge'] = (data['current'] * data['time_diff']) / 3600  # Convert As to mAh
+    data['charge'] = data.groupby(['cell_number', 'cycle_number'])['charge'].cumsum()
+else:
+    print("Error: Required columns for charge calculation are missing. Check column names in CSV.")
+    exit()
+
+# Now check for required columns **after** computing charge
+required_columns = {'cell_number', 'cycle_number', 'voltage', 'current', 'temperature', 'charge'}
+if not required_columns.issubset(data.columns):
+    print("Error: Missing required columns in CSV. Expected columns:", required_columns)
+    exit()
+
+# ========================
+# 2. Aggregate Features
+# ========================
+agg_funcs = {
+    'voltage': 'mean',
+    'current': 'mean',
+    'temperature': 'mean',
+    'charge': 'max'
+}
+grouped = data.groupby(['cell_number', 'cycle_number']).agg(agg_funcs).reset_index()
+
+# Rename columns for clarity
+grouped.rename(columns={
+    'voltage': 'avg_voltage',
+    'current': 'avg_current',
+    'temperature': 'avg_temperature',
+    'charge': 'max_charge'
+}, inplace=True)
 
 
-def load_and_preprocess_data(file_path):
-    """
-    Loads battery data from a CSV file and preprocesses it.
+# ========================
+# 2. Derive State of Health (SOH)
+# ========================
+def compute_soh(df):
+    """Compute SOH as a percentage of the max charge from cycle 1."""
+    if 1 not in df['cycle_number'].values:
+        print(f"Warning: Cell {df['cell_number'].iloc[0]} missing cycle 1 data. SOH calculation may be incorrect.")
+        return df
+    baseline = df.loc[df['cycle_number'] == 1, 'max_charge'].values[0]
+    df['SOH'] = (df['max_charge'] / baseline) * 100
+    return df
 
-    Expected CSV columns:
-      - time: measurement timestamp (optional, not used directly in HMM)
-      - voltage: measured battery voltage
-      - current: measured battery current
-      - cycle_count: number of charge/discharge cycles
-      - temperature: battery temperature
+# Compute SOH for each battery cell
+grouped = grouped.groupby('cell_number', group_keys=False).apply(compute_soh)
 
-    Returns:
-      observed_data: A NumPy array of shape (n_samples, 4) with the observed features.
-    """
-    # Load the CSV file into a DataFrame
-    df = pd.read_csv(file_path)
+# ========================
+# 3. Define Features and Labels
+# ========================
+features = ['avg_voltage', 'avg_current', 'avg_temperature', 'cycle_number']
+X = grouped[features].values
+y = grouped['SOH'].values
 
-    # Data cleaning: Remove any rows with missing values
-    df.dropna(inplace=True)
+# Standardize features
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
 
-    # (Optional) Normalize or standardize the observed features if necessary
-    # Uncomment the following lines to apply z-score normalization:
-    # features = ['voltage', 'current', 'cycle_count', 'temperature']
-    # df[features] = (df[features] - df[features].mean()) / df[features].std()
+# ========================
+# 4. Modeling on Entire Dataset (for comparison)
+# ========================
+models = {
+    "Linear Regression": linear_model.LinearRegression(),
+    "Ridge Regression (alpha=1)": linear_model.Ridge(alpha=1),
+    "Lasso Regression (alpha=1)": linear_model.Lasso(alpha=1, max_iter=10000)
+}
 
-    # Extract the observed variables: voltage, current, cycle_count, and temperature
-    observed_data = df[['voltage_load', 'current_load', 'time', 'temperature_battery']].values
-    return observed_data
+print("\n--- Model Performance on Entire Dataset ---")
+for name, model in models.items():
+    model.fit(X_scaled, y)
+    print(f"{name}: R2 = {model.score(X_scaled, y):.4f}")
 
+# ========================
+# 5. Sequential Train/Test Split
+# ========================
+grouped_sorted = grouped.sort_values(by='cycle_number')
+X_seq = grouped_sorted[features].values
+y_seq = grouped_sorted['SOH'].values
 
-# Load the observed battery data
-observed_data = load_and_preprocess_data(DATA_FILE)
-print("Loaded observed data shape:", observed_data.shape)
-print("First 5 observations:\n", observed_data[:5])
+# Standardize using the same scaler
+X_seq_scaled = scaler.transform(X_seq)
 
-# =============================================================================
-# 2. HMM Setup and Training
-# =============================================================================
-# In our framework, the HMM's observed inputs are the multivariate battery measurements:
-#    - Voltage
-#    - Current
-#    - Cycle Count
-#    - Temperature
-#
-# The hidden state we wish to predict is the battery's "State of Health" (SOH).
-# For this example, we assume three possible SOH levels (e.g., Good, Moderate, Poor).
-#
-# The HMM uses the Baum-Welch algorithm internally (via model.fit) to estimate the transition
-# and emission probabilities from the observed data.
+# Split data: first 50% for training, rest for testing
+split_index = int(0.5 * len(X_seq_scaled))
+X_train, X_test = X_seq_scaled[:split_index], X_seq_scaled[split_index:]
+y_train, y_test = y_seq[:split_index], y_seq[split_index:]
 
-# Define the number of hidden states (battery SOH levels)
-n_hidden_states = 3  # This can be adjusted based on domain knowledge
+print("\n--- Model Performance on Train/Test Split ---")
+for name, model in models.items():
+    model.fit(X_train, y_train)
+    print(f"{name}:")
+    print(f"  R2 on Training Set = {model.score(X_train, y_train):.4f}")
+    print(f"  R2 on Test Set = {model.score(X_test, y_test):.4f}")
 
-# Initialize a Gaussian HMM with diagonal covariance matrices
-hmm_model = GaussianHMM(n_components=n_hidden_states, covariance_type="diag",
-                        n_iter=100, random_state=42)
+# ========================
+# 6. Lasso Regression: Effect of Regularization Parameter (alpha)
+# ========================
+alpha_values = [0.1, 0.25, 0.5, 0.75, 0.9]
+lasso_r2_test = []
 
-# Fit the HMM to the observed data
-hmm_model.fit(observed_data)
+print("\n--- Lasso Regression: Effect of Alpha ---")
+for a in alpha_values:
+    lasso_model = linear_model.Lasso(alpha=a, max_iter=10000)
+    lasso_model.fit(X_train, y_train)
+    r2_test = lasso_model.score(X_test, y_test)
+    lasso_r2_test.append(r2_test)
+    print(f"Alpha = {a}: R2 Test = {r2_test:.4f}")
 
-# =============================================================================
-# 3. Prediction and Output
-# =============================================================================
-# Output: The HMM will predict the hidden states (battery SOH) for each time step.
-# It also provides state probability distributions which indicate the likelihood
-# that the battery is in a specific SOH level given the observed measurements.
-
-# Predict the sequence of hidden states (i.e., battery state of health)
-predicted_soh = hmm_model.predict(observed_data)
-
-# Obtain the state probability distributions for each observation
-state_probabilities = hmm_model.predict_proba(observed_data)
-
-# Display the predictions for verification
-print("\nPredicted Battery State of Health (first 10 observations):")
-print(predicted_soh[:10])
-print("\nState Probability Distributions (first 5 observations):")
-print(state_probabilities[:5])
-
-# =============================================================================
-# 4. Visualization (Optional)
-# =============================================================================
-# Plot the predicted battery state of health over time for a visual inspection.
-plt.figure(figsize=(12, 6))
-plt.plot(predicted_soh, marker='o', linestyle='-', label='Predicted SOH')
-plt.title('Battery State of Health Prediction Using HMM')
-plt.xlabel('Time Index')
-plt.ylabel('Predicted Hidden State (Battery SOH)')
-plt.legend()
+# Plot Lasso R2 vs Alpha
+plt.figure(figsize=(8, 5))
+plt.plot(alpha_values, lasso_r2_test, marker='o', linestyle='-')
+plt.xlabel("Alpha (Regularization Parameter)")
+plt.ylabel("R2 on Test Set")
+plt.title("Effect of Lasso Regularization Parameter on Model Generalizability")
+plt.grid(True)
 plt.show()
