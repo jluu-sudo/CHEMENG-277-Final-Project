@@ -17,7 +17,7 @@ if data['current'].max() > 0:
     data['current'] = -data['current']
 
 # Assume 1 second has passed between each row
-data['time_diff'] = 1  # Replacing calculated time difference with a fixed 1-second interval
+data['time_diff'] = 1  # Fixed interval assumption
 
 # Compute incremental discharge (A·s converted to mAh)
 data['incremental_discharge'] = (data['current'] * data['time_diff']).abs() / 3600
@@ -28,14 +28,14 @@ data['discharge_capacity'] = data.groupby(['cell_number', 'cycle_number'])['incr
 # ========================
 # 2. Remove Unrealistic Temperature Values
 # ========================
-data_filtered = data[data['temperature'] >= 35].copy()  # Remove temperature values below 35°C
+data_filtered = data[data['temperature'] >= 35].copy()  # Keep only values above 35°C
 
 # ========================
 # 3. Aggregate Features for SOH Calculation
 # ========================
 agg_funcs = {
     'voltage': 'mean',
-    'temperature': 'mean',  # Using only filtered temperature values
+    'temperature': 'mean',
     'discharge_capacity': 'max'
 }
 
@@ -101,13 +101,34 @@ for name, model in models.items():
     print(f"  R2 on Test Set = {model.score(X_test, y_test):.4f}")
 
 # ========================
-# 8. Print Feature Coefficients
+# 8. Hyperparameter Tuning for Lasso and Ridge Regression
+# ========================
+
+# Define alpha values to test
+alpha_values = [0.1, 0.25, 0.5, 0.75, 1, 5, 10]
+
+# Lasso Regression Hyperparameter Tuning
+print("\n--- Lasso Regression: Effect of Alpha ---")
+for alpha in alpha_values:
+    lasso = linear_model.Lasso(alpha=alpha, max_iter=10000)
+    lasso.fit(X_train, y_train)
+    print(f"Alpha = {alpha}: R2 Test = {lasso.score(X_test, y_test):.4f}")
+
+# Ridge Regression Hyperparameter Tuning
+print("\n--- Ridge Regression: Effect of Alpha ---")
+for alpha in alpha_values:
+    ridge = linear_model.Ridge(alpha=alpha)
+    ridge.fit(X_train, y_train)
+    print(f"Alpha = {alpha}: R2 Test = {ridge.score(X_test, y_test):.4f}")
+
+# ========================
+# 9. Print Feature Coefficients
 # ========================
 print("\nFeature Coefficients for Linear Regression:")
 print(dict(zip(features, models["Linear Regression"].coef_)))
 
 # ========================
-# 9. Print Key Dataset Metrics (AFTER Model Training)
+# 10. Print Key Dataset Metrics (AFTER Model Training)
 # ========================
 print("\n🔹 Key Dataset Metrics (For Reference, Not Used in Modeling) 🔹")
 print(f"Total rows in dataset: {len(data_filtered)}")
